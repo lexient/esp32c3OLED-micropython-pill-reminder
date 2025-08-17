@@ -51,6 +51,56 @@ i2c = I2C(0, scl=Pin(I2C_SCL_PIN), sda=Pin(I2C_SDA_PIN), freq=I2C_FREQ_HZ)
 oled = SSD1306_I2C(BUFFER_WIDTH, BUFFER_HEIGHT, i2c)
 
 
+# Rotary encoder + switch pins
+ENC_A_PIN = 1
+ENC_B_PIN = 2
+SW_PIN = 0
+
+enc_a = Pin(ENC_A_PIN, Pin.IN, Pin.PULL_UP)
+enc_b = Pin(ENC_B_PIN, Pin.IN, Pin.PULL_UP)
+sw = Pin(SW_PIN, Pin.IN, Pin.PULL_UP)
+
+# Encoder state
+position = 0
+enc_last = (enc_a.value() << 1) | enc_b.value()
+enc_changed = False
+last_enc_ms = 0
+last_reported_detent = 0
+
+# Switch state
+switch_state = sw.value()
+switch_changed = False
+last_sw_ms = 0
+
+def _enc_irq(_):
+    global enc_last, position, enc_changed, last_enc_ms
+    ms = time.ticks_ms()
+    if time.ticks_diff(ms, last_enc_ms) < 2:
+        return
+    last_enc_ms = ms
+    state = (enc_a.value() << 1) | enc_b.value()
+    transition = (enc_last << 2) | state
+    if transition in (0b0001, 0b0111, 0b1110, 0b1000):
+        position += 1
+        enc_changed = True
+    elif transition in (0b0010, 0b0100, 0b1101, 0b1011):
+        position -= 1
+        enc_changed = True
+    enc_last = state
+
+def _sw_irq(_):
+    global switch_state, switch_changed, last_sw_ms
+    ms = time.ticks_ms()
+    if time.ticks_diff(ms, last_sw_ms) < 50:
+        return
+    last_sw_ms = ms
+    switch_state = sw.value()
+    switch_changed = True
+
+enc_a.irq(_enc_irq, Pin.IRQ_RISING | Pin.IRQ_FALLING)
+enc_b.irq(_enc_irq, Pin.IRQ_RISING | Pin.IRQ_FALLING)
+sw.irq(_sw_irq, Pin.IRQ_RISING | Pin.IRQ_FALLING)
+
 def calculate_line_positions(num_lines):
     total_text_height = num_lines * FONT_HEIGHT
     available_space = max(0, DISPLAY_HEIGHT - total_text_height)
@@ -254,9 +304,10 @@ def main():
     render_last_dose(last_info)
 
     last_fetch_ts = time.time()
-    FETCH_INTERVAL_S = 60
+    FETCH_INTERVAL_S = 5
 
     while True:
+        global enc_changed, position, last_reported_detent, switch_changed, switch_state
         now = time.time()
         # Periodically refresh from server
         if now - last_fetch_ts >= FETCH_INTERVAL_S:
@@ -266,7 +317,20 @@ def main():
             last_fetch_ts = now
         # Update the "ago" text every second based on cached epoch
         render_last_dose(last_info)
-        time.sleep(1)
+        for _ in range(20):
+            if enc_changed:
+                enc_changed = False
+                det = position // 4 if position >= 0 else -((-position) // 4)
+                while det > last_reported_detent:
+                    last_reported_detent += 1
+                    print("CW:", last_reported_detent)
+                while det < last_reported_detent:
+                    last_reported_detent -= 1
+                    print("CCW:", last_reported_detent)
+            if switch_changed:
+                switch_changed = False
+                print("SW:", "pressed" if switch_state == 0 else "released")
+            time.sleep(0.05)
 
 
 if __name__ == "__main__":
