@@ -117,13 +117,7 @@ def load_settings():
     try:
         with open(SETTINGS_FILE, "r") as f:
             raw = json.loads(f.read())
-        settings = {
-            "dose_interval_min": int(raw.get("dose_interval_min", DEFAULT_SETTINGS["dose_interval_min"])),
-            "dose_window_start_hour": int(raw.get("dose_window_start_hour", DEFAULT_SETTINGS["dose_window_start_hour"])),
-            "dose_window_end_hour": int(raw.get("dose_window_end_hour", DEFAULT_SETTINGS["dose_window_end_hour"])),
-            "max_doses_per_day": int(raw.get("max_doses_per_day", DEFAULT_SETTINGS["max_doses_per_day"])),
-            "tz_offset_min": int(raw.get("tz_offset_min", DEFAULT_SETTINGS["tz_offset_min"])),
-        }
+        settings = {k: int(raw.get(k, DEFAULT_SETTINGS[k])) for k in DEFAULT_SETTINGS}
     except Exception:
         settings = DEFAULT_SETTINGS.copy()
         try:
@@ -434,13 +428,20 @@ def _draw_big_minutes_centered(total_minutes, label="mins"):
     oled.text(label, lx, ly + TEXT_Y_ADJUST)
 
 
-def format_h_m(seconds):
+def format_duration(seconds, show_days=False):
     if seconds is None or seconds < 0:
         return "unknown"
     minutes = int(seconds // 60)
     hours = minutes // 60
     minutes = minutes % 60
-    return "%dh %02dm" % (hours, minutes)
+    days = hours // 24
+    hours = hours % 24
+    
+    if show_days and days > 0:
+        return "%dd %02dh" % (days, hours)
+    if hours > 0:
+        return "%dh %02dm" % (hours, minutes)
+    return "%dm" % minutes
 
 
 def connect_wifi(ssid, password, timeout_s=20):
@@ -595,20 +596,6 @@ def submit_dose(qty):
     log_mem("submit_dose:end")
 
 
-def format_ago(seconds):
-    print("format_ago", seconds)
-    if seconds is None or seconds < 0:
-        return "unknown"
-    minutes = int(seconds // 60)
-    hours = minutes // 60
-    minutes = minutes % 60
-    days = hours // 24
-    hours = hours % 24
-    if days > 0:
-        return "%dd %02dh" % (days, hours)
-    if hours > 0:
-        return "%dh %02dm" % (hours, minutes)
-    return "%dm" % minutes
 
 
 def format_iso_z(epoch):
@@ -814,7 +801,7 @@ def render_last_dose(info):
     # 1: last dose
     # 2: FRIENDLY_NAME (name)
     # 3: qty(totalmg) e.g., 2(10mg)
-    # 4: time e.g., 3:22pm
+    # 4: time e.g., 3:22pmwa
     qty = info.get("qty")
     dose_val = info.get("dose")
     try:
@@ -864,7 +851,7 @@ def render_daily_total_view(qty_sum, dose_val, unit):
 def render_status_view(status_info):
     label = status_info.get("label", "status")
     since_s = status_info.get("since_s")
-    dur = format_h_m(since_s if since_s is not None else 0)
+    dur = format_duration(since_s if since_s is not None else 0)
     show_message([label, " %s " % dur])
 
 
