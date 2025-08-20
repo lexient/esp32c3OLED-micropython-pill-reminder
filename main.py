@@ -4,6 +4,7 @@ from ssd1306 import SSD1306_I2C
 
 import time
 import network
+import gc
 
 try:
     import urequests as requests
@@ -83,6 +84,7 @@ last_sw_ms = 0
 # App state
 MODE_DISPLAY = 0
 MODE_SUBMIT = 1
+MODE_WARNING = 2
 mode = MODE_DISPLAY
 
 REQUEST_TIMEOUT_S = 2
@@ -99,6 +101,44 @@ def http_post(url, headers=None, data=None):
     except TypeError:
         return requests.post(url, headers=headers, data=data)
 
+# Settings (file-based)
+SETTINGS_FILE = "settings.json"
+DEFAULT_SETTINGS = {
+    "dose_interval_min": 180,          # 3 hours
+    "dose_window_start_hour": 8,       # 08:00
+    "dose_window_end_hour": 16,        # 16:00
+    "max_doses_per_day": 7,
+    "tz_offset_min": 0,                # minutes offset from UTC (e.g. 600 for AEST, -420 for PDT)
+}
+settings = None
+
+def load_settings():
+    global settings
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            raw = json.loads(f.read())
+        settings = {
+            "dose_interval_min": int(raw.get("dose_interval_min", DEFAULT_SETTINGS["dose_interval_min"])),
+            "dose_window_start_hour": int(raw.get("dose_window_start_hour", DEFAULT_SETTINGS["dose_window_start_hour"])),
+            "dose_window_end_hour": int(raw.get("dose_window_end_hour", DEFAULT_SETTINGS["dose_window_end_hour"])),
+            "max_doses_per_day": int(raw.get("max_doses_per_day", DEFAULT_SETTINGS["max_doses_per_day"])),
+            "tz_offset_min": int(raw.get("tz_offset_min", DEFAULT_SETTINGS["tz_offset_min"])),
+        }
+    except Exception:
+        settings = DEFAULT_SETTINGS.copy()
+        try:
+            with open(SETTINGS_FILE, "w") as f:
+                f.write(json.dumps(settings))
+        except Exception:
+            pass
+
+def get_setting(key):
+    cfg = settings if settings else DEFAULT_SETTINGS
+    try:
+        return int(cfg.get(key, DEFAULT_SETTINGS[key]))
+    except Exception:
+        return DEFAULT_SETTINGS[key]
+
 # Submission config
 FRIENDLY_NAME = "dexies"
 DRUG_NAME = "dexamphetamine"
@@ -110,11 +150,49 @@ submit_qty = 0
 submit_entry_detent = 0
 last_user_input_ms = 0
 
+# View system
+VIEW_STATUS = "status"
+VIEW_NEXT_DOSE = "next_dose"
+VIEW_LAST_DOSE = "last_dose"
+VIEW_DAILY_TOTAL = "daily_total"
+VIEW_ERROR = "error"
+VIEW_WARNING = "warning"
+
+current_view = VIEW_STATUS
+default_view = VIEW_STATUS
+last_view_interaction_ms = 0
+post_submit_display_until_s = 0
+
+# Error/Warning state
+error_type = None  # "no wifi" | "db fail"
+warning_reason = None  # "limit" | "too late" | "too soon"
+warning_end_ms = 0
+last_warning_flash_ms = 0
+last_warning_render_ms = 0
+
+# Alarm state (beep + LED flash when zero-consumed within window)
+alarm_active = False
+alarm_buzzer_on = False
+last_alarm_toggle_ms = 0
+alarm_grace_until_s = 0
+
 def ticks_ms():
     return time.ticks_ms()
 
 def ms_since(start_ms):
     return time.ticks_diff(time.ticks_ms(), start_ms)
+
+
+def log_mem(label=""):
+    try:
+        free_b = gc.mem_free()
+        alloc_b = gc.mem_alloc()
+        if label:
+            print("mem", label, "free=", free_b, "alloc=", alloc_b)
+        else:
+            print("mem", "free=", free_b, "alloc=", alloc_b)
+    except Exception:
+        pass
 
 def _enc_irq(_):
     global enc_last, position, enc_changed, last_enc_ms
@@ -186,7 +264,6 @@ def x_for_alignment(text, align):
 
 def draw_box_with_lines(lines, align="center"):
     oled.fill(0)
-    oled.rect(X_OFFSET, Y_OFFSET, DISPLAY_WIDTH, DISPLAY_HEIGHT, 1)
     y_positions = calculate_line_positions(len(lines))
     for text, y in zip(lines, y_positions):
         x = x_for_alignment(text, align)
@@ -273,8 +350,6 @@ def _draw_big_number_centered(num_str):
 
 def show_submission(qty):
     oled.fill(0)
-    # Border
-    oled.rect(X_OFFSET, Y_OFFSET, DISPLAY_WIDTH, DISPLAY_HEIGHT, 1)
     # Title on top line
     title = FRIENDLY_NAME
     tx = x_for_alignment(title, "center")
@@ -283,6 +358,89 @@ def show_submission(qty):
     # Big number centered below
     _draw_big_number_centered(str(qty))
     oled.show()
+
+
+def _draw_big_time_centered(hours, minutes, lines=4):
+    # Draw big HH and MM with small 'h' and 'm' centered within the 72x40 window.
+    # This function only draws digits and labels; caller is responsible for clearing, border, and show.
+    if lines <= 2:
+        h = 16
+    else:
+        h = 24
+    t = max(2, h // 8)
+    w = max(10, (h // 2) + t)
+    gap = max(2, t)
+
+    h_str = str(int(hours))
+    m_str = "%02d" % int(minutes)
+    num_digits = len(h_str) + len(m_str)
+    total_w = num_digits * w + (num_digits - 1) * gap + (2 * gap)
+    start_x = X_OFFSET + max(0, (DISPLAY_WIDTH - total_w) // 2)
+    top_y = Y_OFFSET + max(0, (DISPLAY_HEIGHT - h) // 2)
+
+    x = start_x
+    for ch in h_str:
+        if '0' <= ch <= '9':
+            _draw_digit_7seg(x, top_y, w, h, t, ord(ch) - 48)
+        x += w + gap
+    oled.text('h', x - gap // 2, top_y - 1 + TEXT_Y_ADJUST)
+    x += gap
+    for ch in m_str:
+        if '0' <= ch <= '9':
+            _draw_digit_7seg(x, top_y, w, h, t, ord(ch) - 48)
+        x += w + gap
+    oled.text('m', x - gap, top_y - 1 + TEXT_Y_ADJUST)
+
+
+def _draw_big_minutes_centered(total_minutes, label="mins"):
+    # Draw a slightly smaller big minute count centered, with a label below
+    try:
+        total_minutes = int(total_minutes)
+    except Exception:
+        total_minutes = 0
+    num_str = str(max(0, total_minutes))
+
+    # Slightly smaller than previous big time (h=24) → use 20
+    h = 20
+    t = max(2, h // 8)
+    w = max(10, (h // 2) + t)
+    gap = max(2, t)
+
+    n = len(num_str)
+    total_w = n * w + (n - 1) * gap
+    if total_w > DISPLAY_WIDTH:
+        scale = DISPLAY_WIDTH / total_w
+        h = max(14, int(h * scale))
+        t = max(2, int(t * scale))
+        w = max(8, int(w * scale))
+        gap = max(1, int(gap * scale))
+        total_w = n * w + (n - 1) * gap
+
+    start_x = X_OFFSET + max(0, (DISPLAY_WIDTH - total_w) // 2)
+    # Leave room for the label under the digits
+    label_h = FONT_HEIGHT
+    label_gap = 2
+    top_y = Y_OFFSET + max(0, (DISPLAY_HEIGHT - (h + label_h + label_gap)) // 2)
+
+    x = start_x
+    for ch in num_str:
+        if '0' <= ch <= '9':
+            _draw_digit_7seg(x, top_y, w, h, t, ord(ch) - 48)
+        x += w + gap
+
+    # Label centered below
+    lx = x_for_alignment(label, "center")
+    ly = top_y + h + label_gap
+    oled.text(label, lx, ly + TEXT_Y_ADJUST)
+
+
+def format_h_m(seconds):
+    if seconds is None or seconds < 0:
+        return "unknown"
+    minutes = int(seconds // 60)
+    hours = minutes // 60
+    minutes = minutes % 60
+    return "%dh %02dm" % (hours, minutes)
 
 
 def connect_wifi(ssid, password, timeout_s=20):
@@ -355,6 +513,7 @@ def parse_iso8601_to_epoch(iso_str):
         return epoch_local - tz_offset_sec
     except Exception:
         return None
+    
 
 
 def fetch_last_dose():
@@ -396,6 +555,12 @@ def fetch_last_dose():
                 r.close()
         except Exception:
             pass
+        gc.collect()
+        log_mem("fetch_today_summary:after_collect")
+        gc.collect()
+        log_mem("fetch_last_dose:after_collect")
+    gc.collect()
+    log_mem("fetch_last_dose:end")
 
 
 def submit_dose(qty):
@@ -424,9 +589,14 @@ def submit_dose(qty):
                 r.close()
         except Exception:
             pass
+        gc.collect()
+        log_mem("fetch_current_status:after_collect")
+    gc.collect()
+    log_mem("submit_dose:end")
 
 
 def format_ago(seconds):
+    print("format_ago", seconds)
     if seconds is None or seconds < 0:
         return "unknown"
     minutes = int(seconds // 60)
@@ -441,85 +611,510 @@ def format_ago(seconds):
     return "%dm" % minutes
 
 
-def render_last_dose(info):
-    if not info or not info.get("epoch"):
-        show_message(["Recent", "Missing"])
-        return
-    now = time.time()
-    ago = format_ago(now - info["epoch"])
-    qty = info.get("qty")
-    drug = info.get("drug") or ""
-    dose = info.get("dose")
-    dose_unit = info.get("dose_unit") or ""
+def format_iso_z(epoch):
+    try:
+        tm = time.localtime(int(epoch))
+        return "%04d-%02d-%02dT%02d:%02d:%02dZ" % (tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
+    except Exception:
+        tm = time.localtime()
+        return "%04d-%02d-%02dT%02d:%02d:%02dZ" % (tm[0], tm[1], tm[2], tm[3], tm[4], tm[5])
 
-    # Build compact lines for the 72x40 area (max ~9 chars each)
-    dose_str = ""
-    if dose is not None and dose_unit:
-        # Keep concise; e.g., "5mg"
+
+def format_local_hhmm_ampm(epoch=None):
+    try:
+        if epoch is None:
+            epoch = time.time()
+        tz_s = get_setting("tz_offset_min") * 60
+        tm = time.localtime(int(epoch) + tz_s)
+        hour_24 = tm[3]
+        minute = tm[4]
+        ampm = "am" if hour_24 < 12 else "pm"
+        hour_12 = hour_24 % 12
+        if hour_12 == 0:
+            hour_12 = 12
+        return "%d:%02d%s" % (hour_12, minute, ampm)
+    except Exception:
+        tm = time.localtime()
+        return "%02d:%02d" % (tm[3], tm[4])
+
+
+def today_bounds_epoch():
+    # Compute start/end of local day, return as UTC epoch, honoring tz_offset_min
+    tz_s = get_setting("tz_offset_min") * 60
+    now_utc = time.time()
+    lt = time.localtime(now_utc + tz_s)
+    start_local = (lt[0], lt[1], lt[2], 0, 0, 0, 0, 0)
+    end_local = (lt[0], lt[1], lt[2], 23, 59, 59, 0, 0)
+    start = time.mktime(start_local) - tz_s
+    end = time.mktime(end_local) - tz_s
+    return start, end
+
+
+def window_bounds_epoch():
+    # Compute local dosing window today, return as UTC epoch, honoring tz_offset_min
+    tz_s = get_setting("tz_offset_min") * 60
+    now_utc = time.time()
+    lt = time.localtime(now_utc + tz_s)
+    ws_local = (lt[0], lt[1], lt[2], get_setting("dose_window_start_hour"), 0, 0, 0, 0)
+    we_local = (lt[0], lt[1], lt[2], get_setting("dose_window_end_hour"), 0, 0, 0, 0)
+    ws = time.mktime(ws_local) - tz_s
+    we = time.mktime(we_local) - tz_s
+    return ws, we
+
+
+def fetch_today_summary():
+    global error_type
+    r = None
+    try:
+        start, end = today_bounds_epoch()
+        start_iso = format_iso_z(start)
+        end_iso = format_iso_z(end)
+        url = "%s/rest/v1/stimulants?select=created_at,qty,dose,dose_unit&created_at=gte.%s&created_at=lte.%s&order=created_at.asc" % (SUPABASE_URL, start_iso, end_iso)
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": "Bearer %s" % SUPABASE_KEY,
+            "Accept": "application/json",
+        }
+        r = http_get(url, headers=headers)
+        if 200 <= r.status_code < 300:
+            error_type = None
+            data = json.loads(r.text)
+            qty_sum = 0
+            total_mg = 0
+            last_epoch = None
+            for item in data:
+                q = int(item.get("qty") or 0)
+                d = item.get("dose")
+                try:
+                    d = int(d) if d is not None and int(d) == d else (d if d is not None else DOSE)
+                except Exception:
+                    d = DOSE
+                qty_sum += q
+                total_mg += q * d
+                ce = item.get("created_at")
+                if ce:
+                    ep = parse_iso8601_to_epoch(ce)
+                    if ep is not None:
+                        last_epoch = ep
+            return {"qty_sum": qty_sum, "total_mg": total_mg, "last_epoch": last_epoch}
+        else:
+            error_type = "db fail"
+            return None
+    except Exception:
+        error_type = "db fail"
+        return None
+    finally:
         try:
-            dose_val = int(dose) if int(dose) == dose else dose
-            dose_str = "%s%s" % (dose_val, dose_unit)
+            if r is not None:
+                r.close()
         except Exception:
-            dose_str = "%s%s" % (dose, dose_unit)
+            pass
 
-    qty_str = ("x%s" % qty) if qty is not None else ""
 
-    line1 = "Last dose"
-    line2 = ago
-    line3 = (drug[:9]) if drug else ""
-    line4 = (dose_str + (" " if dose_str and qty_str else "") + qty_str)[:9]
+def fetch_current_status():
+    global error_type
+    r = None
+    try:
+        url = "%s/rest/v1/daily_log?select=created_at,event_type&order=created_at.desc&limit=1" % SUPABASE_URL
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": "Bearer %s" % SUPABASE_KEY,
+            "Accept": "application/json",
+        }
+        r = http_get(url, headers=headers)
+        if 200 <= r.status_code < 300:
+            error_type = None
+            data = json.loads(r.text)
+            if isinstance(data, list) and len(data) > 0:
+                item = data[0]
+                ev = (item.get("event_type") or "").strip()
+                ce = item.get("created_at")
+                ep = parse_iso8601_to_epoch(ce) if ce else None
+                label_map = {
+                    "work_start": "work",
+                    "journal_start": "journal",
+                    "awake": "awake",
+                    "asleep": "asleep",
+                    "work_end": "relax",
+                }
+                label = label_map.get(ev, ev or "status")
+                return {"label": label, "epoch": ep}
+            return {"label": "status", "epoch": None}
+        else:
+            error_type = "db fail"
+            return {"label": "status", "epoch": None}
+    except Exception:
+        error_type = "db fail"
+        return {"label": "status", "epoch": None}
+    finally:
+        try:
+            if r is not None:
+                r.close()
+        except Exception:
+            pass
 
-    lines = [l for l in [line2, line4] if l]
-    show_message(lines)
+
+def compute_next_dose_time(last_dose_epoch, today_qty_sum):
+    # Returns epoch of earliest next scheduled dose within window or None
+    now = time.time()
+    ws, we = window_bounds_epoch()
+    max_pills = get_setting("max_doses_per_day")
+    if today_qty_sum is not None and today_qty_sum >= max_pills:
+        return None
+    # First dose of day: schedule at window start only
+    if today_qty_sum is not None and today_qty_sum == 0:
+        if now < ws:
+            return ws
+        return None
+    # Otherwise, based on interval since last dose
+    interval_s = get_setting("dose_interval_min") * 60
+    if last_dose_epoch is None:
+        return ws if now < ws else None
+    earliest = last_dose_epoch + interval_s
+    if earliest < ws:
+        earliest = ws
+    if earliest > we:
+        return None
+    return earliest
+
+
+def check_submission_restrictions(last_dose_epoch, today_qty_sum):
+    # Returns (allowed: bool, reason: str or None)
+    now = time.time()
+    ws, we = window_bounds_epoch()
+    max_pills = get_setting("max_doses_per_day")
+    if today_qty_sum is not None and today_qty_sum >= max_pills:
+        return False, "limit"
+    if now < ws:
+        return False, "too soon"
+    if now > we:
+        return False, "too late"
+    if last_dose_epoch is not None:
+        interval_s = get_setting("dose_interval_min") * 60
+        if now < (last_dose_epoch + interval_s):
+            return False, "too soon"
+    return True, None
+
+def render_last_dose(info):
+    # Desired layout (no big time):
+    #  last dose
+    #  dexies
+    #  2 @ 1:12pm
+    oled.fill(0)
+    if not info or not info.get("epoch"):
+        show_message(["last dose"], align="left")
+        return
+    epoch = info.get("epoch")
+    start, _end = today_bounds_epoch()
+    # If last dose was not today, show only the title
+    if epoch < start:
+        show_message(["last dose"], align="left")
+        return
+    # Lines per spec:
+    # 1: last dose
+    # 2: FRIENDLY_NAME (name)
+    # 3: qty(totalmg) e.g., 2(10mg)
+    # 4: time e.g., 3:22pm
+    qty = info.get("qty")
+    dose_val = info.get("dose")
+    try:
+        dose_val = int(dose_val) if dose_val is not None and int(dose_val) == dose_val else (dose_val if dose_val is not None else DOSE)
+    except Exception:
+        dose_val = DOSE
+    try:
+        qty_int = int(qty) if qty is not None else None
+    except Exception:
+        qty_int = None
+    if qty_int is not None:
+        total_mg = qty_int * int(dose_val)
+        qty_line = "%d(%d%s)" % (qty_int, total_mg, DOSE_UNIT)
+    else:
+        qty_line = "?"
+    time_line = format_local_hhmm_ampm(epoch)
+    show_message(["last dose", FRIENDLY_NAME, qty_line, time_line], align="left")
+
+
+def render_time_until_next(seconds_remaining):
+    if seconds_remaining is None:
+        show_message(["next dose", "unknown"])
+        return
+    # When overdue, clamp to 0 minutes; alarm will flash the screen
+    if seconds_remaining < 0:
+        seconds_remaining = 0
+    minutes = (seconds_remaining // 60)
+    oled.fill(0)
+    _draw_big_minutes_centered(minutes, label="mins")
+    oled.show()
+
+
+def render_daily_total_view(qty_sum, dose_val, unit):
+    try:
+        dose_val = int(dose_val)
+    except Exception:
+        dose_val = DOSE
+    qty_sum = int(qty_sum or 0)
+    total_mg = qty_sum * dose_val
+    # Left-aligned summary like last-dose view
+    top = "total"
+    mid = FRIENDLY_NAME
+    bot = "%d(%d%s)" % (qty_sum, total_mg, unit)
+    show_message([top, mid, bot], align="left")
+
+
+def render_status_view(status_info):
+    label = status_info.get("label", "status")
+    since_s = status_info.get("since_s")
+    dur = format_h_m(since_s if since_s is not None else 0)
+    show_message([label, " %s " % dur])
+
+
+def render_error_view(err):
+    if not err:
+        show_message(["ok"])
+        return
+    if err == "no wifi":
+        show_message(["error", "no wifi"])
+    elif err == "db fail":
+        show_message(["error", "db fail"]) 
+    else:
+        show_message(["error", str(err)[:12]])
 
 
 def enter_submission_mode():
-    global mode, submit_qty, submit_entry_detent, last_user_input_ms
+    global mode, submit_qty, submit_entry_detent, last_user_input_ms, last_reported_detent, enc_changed, alarm_buzzer_on
     mode = MODE_SUBMIT
+    # Immediately stop any active alarm effects
+    buzzer.value(0)
+    alarm_buzzer_on = False
+    try:
+        oled.invert(0)
+    except Exception:
+        pass
     led_on()
     det = position // 4 if position >= 0 else -((-position) // 4)
     submit_entry_detent = det
     submit_qty = 0
     last_user_input_ms = ticks_ms()
+    last_reported_detent = det
+    enc_changed = False
     show_submission(submit_qty)
+    print("enter_submission_mode", submit_qty)
 
 
 def exit_submission_mode():
     global mode
     mode = MODE_DISPLAY
     led_off()
+    print("exit_submission_mode")
+
+
+def enter_warning_mode(reason):
+    global mode, warning_reason, warning_end_ms, last_warning_flash_ms, last_warning_render_ms
+    mode = MODE_WARNING
+    warning_reason = reason or "warning"
+    try:
+        warning_end_ms = time.ticks_add(ticks_ms(), 3000)
+    except Exception:
+        warning_end_ms = ticks_ms() + 3000
+    last_warning_flash_ms = ticks_ms()
+    last_warning_render_ms = 0
+    print("enter_warning_mode", reason)
+
+
+def render_warning_view():
+    label = "warning"
+    reason = warning_reason or ""
+    reason_map = {"limit": "limit", "too late": "too late", "too soon": "too soon"}
+    reason_text = reason_map.get(reason, reason)
+    lines = [label, reason_text, "ignore"]
+    show_message(lines)
+
+
+def cycle_view(available_views):
+    global current_view, last_view_interaction_ms
+    try:
+        i = available_views.index(current_view)
+        current_view = available_views[(i + 1) % len(available_views)]
+    except Exception:
+        if available_views:
+            current_view = available_views[0]
+        else:
+            current_view = VIEW_STATUS
+    last_view_interaction_ms = ticks_ms()
+    print("cycle_view", current_view)
+
+
+def select_default_view(next_dose_epoch, last_dose_info, today_qty_sum, status_info):
+    now = time.time()
+    print("select_default_view", "| the time is", format_local_hhmm_ampm(now))
+    if post_submit_display_until_s and now < post_submit_display_until_s:
+        return VIEW_LAST_DOSE
+    if next_dose_epoch is not None:
+        if now >= (next_dose_epoch - 90 * 60) and now <= next_dose_epoch:
+            return VIEW_NEXT_DOSE
+    return VIEW_STATUS
+    
+
+
+def update_alarm_state(today_qty_sum, next_dose_epoch, last_dose_epoch):
+    # Decide whether to enable alarm based on dosing rules and timing
+    global alarm_active
+    now = time.time()
+    ws, we = window_bounds_epoch()
+
+    # Suppress alarm during grace period
+    if now < alarm_grace_until_s:
+        alarm_active = False
+        return
+
+    # Do not alarm outside window
+    if not (now >= ws and now <= we):
+        alarm_active = False
+        return
+
+    # Respect submission restrictions (max per day, too soon, etc.)
+    allow, _reason = check_submission_restrictions(last_dose_epoch, today_qty_sum)
+    if not allow:
+        alarm_active = False
+        return
+
+    # If zero taken so far today and within window, alarm to prompt first dose
+    if (today_qty_sum or 0) == 0:
+        alarm_active = True
+        return
+
+    # Otherwise, alarm when the next dose is due (countdown <= 0)
+    if next_dose_epoch is not None and now >= next_dose_epoch:
+        alarm_active = True
+        return
+
+    alarm_active = False
+
+
+def tick_alarm_effects():
+    global last_alarm_toggle_ms, alarm_buzzer_on
+    if mode != MODE_DISPLAY or not alarm_active:
+        if alarm_buzzer_on:
+            buzzer.value(0)
+            alarm_buzzer_on = False
+        led_off()
+        # Ensure display is back to normal
+        try:
+            oled.invert(0)
+        except Exception:
+            pass
+        return
+    now_ms = ticks_ms()
+    if ms_since(last_alarm_toggle_ms) >= 250:
+        last_alarm_toggle_ms = now_ms
+        # Toggle LED
+        led.value(1 - led.value())
+        # Toggle buzzer and screen inversion in sync
+        if alarm_buzzer_on:
+            buzzer.value(0)
+            try:
+                oled.invert(0)
+            except Exception:
+                pass
+            alarm_buzzer_on = False
+        else:
+            buzzer.value(1)
+            try:
+                oled.invert(1)
+            except Exception:
+                pass
+            alarm_buzzer_on = True
 
 
 def main():
+    global error_type, current_view, default_view, last_view_interaction_ms, post_submit_display_until_s, last_warning_flash_ms, last_warning_render_ms
     show_message(["Booting"])
 
-    if not connect_wifi(WIFI_SSID, WIFI_PASSWORD):
-        # Stay in display mode with error shown briefly, then continue offline
+    load_settings()
+
+    wifi_ok = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
+    print("wifi_ok", wifi_ok)
+    if not wifi_ok:
+        error_type = "no wifi"
         time.sleep(2)
+        print("no wifi")
 
-    # Try NTP sync (optional but recommended for correct "ago")
-    if not sync_time_via_ntp():
-        # Proceed even if NTP fails; server time can still be shown as "unknown"
-        pass
-
+    sync_time_via_ntp()
     last_info = fetch_last_dose()
-    render_last_dose(last_info)
+    today = fetch_today_summary()
+    status_info = fetch_current_status()
+    if today is None:
+        today = {"qty_sum": 0, "total_mg": 0, "last_epoch": None}
+    if status_info is None:
+        status_info = {"label": "status", "epoch": None}
 
-    last_fetch_ts = time.time()
-    FETCH_INTERVAL_S = 5
+    next_dose_epoch = compute_next_dose_time((last_info or {}).get("epoch"), today.get("qty_sum"))
+    last_view_interaction_ms = ticks_ms()
+    current_view = select_default_view(next_dose_epoch, last_info, today.get("qty_sum"), status_info)
+    default_view = VIEW_STATUS
+
+    last_dose_fetch_ts = time.time()
+    last_summary_fetch_ts = last_dose_fetch_ts
+    last_status_fetch_ts = last_dose_fetch_ts
+    FETCH_LAST_DOSE_INTERVAL_S = 30
+    FETCH_TODAY_SUMMARY_INTERVAL_S = 60
+    FETCH_STATUS_INTERVAL_S = 60
 
     while True:
         global enc_changed, position, last_reported_detent, switch_changed, switch_state, mode, submit_qty, submit_entry_detent, last_user_input_ms
         now = time.time()
 
-        # Periodically refresh from server while in display mode
         if mode == MODE_DISPLAY:
-            if now - last_fetch_ts >= FETCH_INTERVAL_S:
+            if now - last_dose_fetch_ts >= FETCH_LAST_DOSE_INTERVAL_S:
                 info = fetch_last_dose()
                 if info:
                     last_info = info
-                last_fetch_ts = now
-            render_last_dose(last_info)
+                last_dose_fetch_ts = now
+            if now - last_summary_fetch_ts >= FETCH_TODAY_SUMMARY_INTERVAL_S:
+                t = fetch_today_summary()
+                if t is not None:
+                    today = t
+                last_summary_fetch_ts = now
+            if now - last_status_fetch_ts >= FETCH_STATUS_INTERVAL_S:
+                s = fetch_current_status()
+                if s is not None:
+                    status_info = s
+                last_status_fetch_ts = now
+            next_dose_epoch = compute_next_dose_time((last_info or {}).get("epoch"), today.get("qty_sum"))
+
+            update_alarm_state(today.get("qty_sum"), next_dose_epoch, (last_info or {}).get("epoch"))
+            tick_alarm_effects()
+
+            if ms_since(last_view_interaction_ms) >= 10000:
+                current_view = select_default_view(next_dose_epoch, last_info, today.get("qty_sum"), status_info)
+                last_view_interaction_ms = ticks_ms()
+
+            if mode == MODE_DISPLAY:
+                if current_view == VIEW_STATUS:
+                    since_s = None
+                    ep = status_info.get("epoch")
+                    if ep is not None:
+                        try:
+                            ep_i = int(ep)
+                        except Exception:
+                            ep_i = int(now)
+                        since_s = max(0, int(int(now) - ep_i))
+                    render_status_view({"label": status_info.get("label", "status"), "since_s": since_s})
+                elif current_view == VIEW_NEXT_DOSE:
+                    if next_dose_epoch is not None:
+                        remaining = max(0, int(next_dose_epoch - now))
+                        render_time_until_next(remaining)
+                    else:
+                        show_message(["next", "unknown"])
+                elif current_view == VIEW_LAST_DOSE:
+                    render_last_dose(last_info)
+                    print("render_last_dose", last_info)
+                elif current_view == VIEW_DAILY_TOTAL:
+                    render_daily_total_view(today.get("qty_sum"), (last_info or {}).get("dose") or DOSE, DOSE_UNIT)
+                    print("render_daily_total_view", today.get("qty_sum"), (last_info or {}).get("dose") or DOSE, DOSE_UNIT)
+                elif current_view == VIEW_ERROR:
+                    render_error_view(error_type)
+                    print("render_error_view", error_type)
 
         # Polling interval ~50ms
         for _ in range(20):
@@ -528,8 +1123,12 @@ def main():
                 enc_changed = False
                 det = position // 4 if position >= 0 else -((-position) // 4)
                 if mode == MODE_DISPLAY:
-                    # Any turn enters submission mode
-                    enter_submission_mode()
+                    last_view_interaction_ms = ticks_ms()
+                    allow, reason = check_submission_restrictions((last_info or {}).get("epoch"), (today or {}).get("qty_sum"))
+                    if allow:
+                        enter_submission_mode()
+                    else:
+                        enter_warning_mode(reason)
                     last_reported_detent = det
                 elif mode == MODE_SUBMIT:
                     last_user_input_ms = ticks_ms()
@@ -543,9 +1142,19 @@ def main():
             # Handle switch changes
             if switch_changed:
                 switch_changed = False
-                # press to enter submission mode from display
-                if mode == MODE_DISPLAY and switch_state == 0:
-                    enter_submission_mode()
+                if switch_state == 0:
+                    if mode == MODE_DISPLAY:
+                        # Single press cycles between views
+                        available = [VIEW_STATUS]
+                        if next_dose_epoch is not None:
+                            available.append(VIEW_NEXT_DOSE)
+                        available.append(VIEW_LAST_DOSE)
+                        available.append(VIEW_DAILY_TOTAL)
+                        if error_type:
+                            available.append(VIEW_ERROR)
+                        cycle_view(available)
+                    elif mode == MODE_WARNING:
+                        enter_submission_mode()
                 elif mode == MODE_SUBMIT:
                     # treat as user activity only
                     last_user_input_ms = ticks_ms()
@@ -603,6 +1212,17 @@ def main():
                                 info = fetch_last_dose()
                                 if info:
                                     last_info = info
+                                # Suppress alarm while backend updates daily summary
+                                try:
+                                    from time import time as _now
+                                except Exception:
+                                    _now = time.time
+                                try:
+                                    # 2-minute grace period
+                                    globals()["alarm_grace_until_s"] = _now() + 120
+                                except Exception:
+                                    pass
+                                post_submit_display_until_s = time.time() + 30
                                 render_last_dose(last_info)
                             else:
                                 show_message(["fail"])
@@ -610,6 +1230,21 @@ def main():
                                 time.sleep(1.0)
                                 exit_submission_mode()
                                 render_last_dose(last_info)
+
+            # Warning mode logic
+            if mode == MODE_WARNING:
+                # Only render at most every 250ms to reduce redraws/logs
+                if time.ticks_diff(ticks_ms(), last_warning_render_ms) >= 250:
+                    last_warning_render_ms = ticks_ms()
+                    render_warning_view()
+                if time.ticks_diff(ticks_ms(), last_warning_flash_ms) >= 100:
+                    last_warning_flash_ms = ticks_ms()
+                    led.value(1 - led.value())
+                if time.ticks_diff(ticks_ms(), warning_end_ms) >= 0:
+                    mode = MODE_DISPLAY
+                    led_off()
+                    current_view = select_default_view(next_dose_epoch, last_info, today.get("qty_sum"), status_info)
+                    last_view_interaction_ms = ticks_ms()
 
                 # keep submission UI visible if active
                 # show_submission called on qty change

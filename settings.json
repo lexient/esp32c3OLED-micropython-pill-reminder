@@ -1,0 +1,7 @@
+{
+  "dose_interval_min": 180,
+  "dose_window_start_hour": 8,
+  "dose_window_end_hour": 16,
+  "max_doses_per_day": 7,
+  "tz_offset_min": 600
+}
