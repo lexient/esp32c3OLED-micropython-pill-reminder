@@ -855,12 +855,13 @@ def render_error_view(err):
     if not err:
         show_message(["ok"])
         return
-    if err == "no wifi":
-        show_message(["error", "no wifi"])
-    elif err == "db fail":
-        show_message(["error", "db fail"]) 
-    else:
-        show_message(["error", str(err)[:12]])
+    
+    error_messages = {
+        "no wifi": "no wifi",
+        "db fail": "db fail"
+    }
+    msg = error_messages.get(err, str(err)[:12])
+    show_message(["error", msg])
 
 
 def enter_submission_mode():
@@ -905,12 +906,8 @@ def enter_warning_mode(reason):
 
 
 def render_warning_view():
-    label = "warning"
-    reason = warning_reason or ""
-    reason_map = {"limit": "limit", "too late": "too late", "too soon": "too soon"}
-    reason_text = reason_map.get(reason, reason)
-    lines = [label, reason_text, "ignore"]
-    show_message(lines)
+    reason_text = warning_reason or "warning"
+    show_message(["warning", reason_text, "ignore"])
 
 
 def cycle_view(available_views):
@@ -1179,10 +1176,7 @@ def main():
                             success = False
                             while attempt < 3 and not success:
                                 attempt += 1
-                                if attempt < 3:
-                                    show_message(["retrying", "%d/3..." % attempt])
-                                else:
-                                    show_message(["retrying", "3/3..."])
+                                show_message(["retrying", "%d/3..." % attempt])
                                 success = submit_dose(submit_qty)
                                 if not success:
                                     flash_led(1, 150, 150)
