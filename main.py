@@ -278,36 +278,32 @@ def _draw_digit_7seg(x, y, w, h, t, digit):
     top_h = max(1, (h - 3 * t) // 2)
     bot_h = top_h
 
-    # Segment drawers
-    def seg_a():
-        oled.fill_rect(x + t, top_y, inner_w, t, 1)
-    def seg_g():
-        oled.fill_rect(x + t, mid_y - (t // 2), inner_w, t, 1)
-    def seg_d():
-        oled.fill_rect(x + t, bot_y, inner_w, t, 1)
-    def seg_f():
-        oled.fill_rect(x, top_y + t, t, top_h, 1)
-    def seg_b():
-        oled.fill_rect(x + w - t, top_y + t, t, top_h, 1)
-    def seg_e():
-        oled.fill_rect(x, mid_y + (t // 2), t, bot_h, 1)
-    def seg_c():
-        oled.fill_rect(x + w - t, mid_y + (t // 2), t, bot_h, 1)
-
-    segments = {
-        0: (seg_a, seg_b, seg_c, seg_d, seg_e, seg_f),
-        1: (seg_b, seg_c),
-        2: (seg_a, seg_b, seg_g, seg_e, seg_d),
-        3: (seg_a, seg_b, seg_g, seg_c, seg_d),
-        4: (seg_f, seg_g, seg_b, seg_c),
-        5: (seg_a, seg_f, seg_g, seg_c, seg_d),
-        6: (seg_a, seg_f, seg_g, seg_e, seg_c, seg_d),
-        7: (seg_a, seg_b, seg_c),
-        8: (seg_a, seg_b, seg_c, seg_d, seg_e, seg_f, seg_g),
-        9: (seg_a, seg_b, seg_c, seg_d, seg_f, seg_g),
+    # Segment coordinates
+    segs = {
+        'a': (x + t, top_y, inner_w, t),
+        'b': (x + w - t, top_y + t, t, top_h),
+        'c': (x + w - t, mid_y + (t // 2), t, bot_h),
+        'd': (x + t, bot_y, inner_w, t),
+        'e': (x, mid_y + (t // 2), t, bot_h),
+        'f': (x, top_y + t, t, top_h),
+        'g': (x + t, mid_y - (t // 2), inner_w, t),
     }
-    for drawer in segments.get(digit, (seg_a, seg_d, seg_g)):
-        drawer()
+
+    digit_segments = {
+        0: 'abcdef',
+        1: 'bc',
+        2: 'abged',
+        3: 'abgcd',
+        4: 'fgbc',
+        5: 'afgcd',
+        6: 'afgecd',
+        7: 'abc',
+        8: 'abcdefg',
+        9: 'abcdfg',
+    }
+    
+    for seg_name in digit_segments.get(digit, 'adg'):
+        oled.fill_rect(*segs[seg_name], 1)
 
 
 def _draw_big_number_centered(num_str):
