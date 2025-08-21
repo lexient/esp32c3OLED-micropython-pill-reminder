@@ -27,10 +27,10 @@ Y_OFFSET = (BUFFER_HEIGHT - DISPLAY_HEIGHT) // 2 + 12  # panel y adjustment
 # hardware setup
 i2c = I2C(0, scl=Pin(6), sda=Pin(5), freq=400000)
 oled = SSD1306_I2C(BUFFER_WIDTH, BUFFER_HEIGHT, i2c)
-enc_a = Pin(1, Pin.IN, Pin.PULL_UP)
-enc_b = Pin(2, Pin.IN, Pin.PULL_UP)
+enc_a = Pin(3, Pin.IN, Pin.PULL_UP)
+enc_b = Pin(4, Pin.IN, Pin.PULL_UP)
 sw = Pin(0, Pin.IN, Pin.PULL_UP)
-buzzer = Pin(10, Pin.OUT)
+buzzer = Pin(2, Pin.OUT)
 buzzer.value(0)
 led = Pin(8, Pin.OUT)
 led.value(1)  # active low
@@ -578,7 +578,7 @@ def main():
     # main program loop
     global error_type, current_view, last_view_interaction_ms, post_submit_display_until_s
     global enc_changed, position, switch_changed, switch_state, mode, submit_qty, alarm_grace_until_s
-    global warning_end_ms, last_warning_flash_ms, last_warning_render_ms
+    global warning_end_ms, last_warning_flash_ms, last_warning_render_ms, last_user_input_ms, submit_entry_detent, warning_reason
     
     show_message(["Booting"])
     load_settings()
@@ -684,7 +684,7 @@ def main():
                         last_view_interaction_ms = time.ticks_ms()
                     elif mode == MODE_WARNING:
                         enter_submission_mode()
-                elif mode == MODE_SUBMIT:
+                elif mode == MODE_SUBMIT and switch_state == 1:
                     last_user_input_ms = time.ticks_ms()
             
             # submission mode timeout and processing
