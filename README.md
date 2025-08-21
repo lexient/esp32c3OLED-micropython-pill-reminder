@@ -1,9 +1,7 @@
 ## MicroPython Pill Timer
-I'm a full stack web dev, and this is my first ever MicroPython project.
+Built for myself, an individual so forgetful that he often forgets to take his medication, as well as whether he took it in the first place. 
 
-I'll be creating a web-based pill reminder that tracks doses using a postgres server.  
-
-Aimed at other noobs (with some dev / python experience) that just want to get started with MicroPython.
+I'm a full stack web dev, and this is my first ever MicroPython project - so keep your expectations fairly low.
 
 ### Introduction
 I've dabbled with Arduino but never MicroPython. 
@@ -43,9 +41,16 @@ This assumes you're using an ESP32 (since that's the only reasonable option)
 6. Then flash the downloaded binary `esptool.py --chip esp32c3 --port [port from before] --baud 460800 write_flash -z 0x0 ESP32_GENERIC_C3-20250809-v1.26.0.bin`
 7. Test with Minicom: `minicom -D [port from before] -b 115200` and just run some python `print("hello world")`
 
-**Set up a new project and Move files to ESP32** (skipping over git and python setup for now)
-1. Create a new project folder, set up git, and a venv, and `pip install mpremote`
-2. Copy a file to the ESP32 and reset: `mpremote cp main.py : + reset`
+**Project setup**
+1. Clone this repo and create a virtualenv
+   - `python3 -m venv .venv && source .venv/bin/activate`
+   - `pip install -r requirements.txt`
+2. Copy `secrets.example.py` to `secrets.py` and fill in your Wifi and Supabase details
+3. Optionally tweak `settings.json` for your schedule and timezone offset (minutes)
+
+**Deploy to ESP32-C3**
+- Fast path: `make deploy` (uses first `/dev/tty.usbmodem*`)
+- Or manually: `mpremote cp main.py : && mpremote cp ssd1306.py : && mpremote cp settings.json : && mpremote cp secrets.py : && mpremote reset`
 
 **Adding the OLED driver**
 1. `ssd1306.py` is included in this repo.
@@ -56,6 +61,9 @@ This assumes you're using an ESP32 (since that's the only reasonable option)
 #### Troubleshooting
 **Issues with mpremote**
 Run `mpremote connect [port from before]` to make sure its actually connected
+
+**Secrets safety**
+- This repo ignores `secrets.py`. Do not commit real keys. Share only `secrets.example.py`.
 
 
 ### Hardware
@@ -70,3 +78,60 @@ This bad boy has Wifi and 4MB of RAM
 
 
 #### This project is still in development
+
+### Database (Supabase) quick setup
+This project uses my own database. To run it yourself, create minimal tables and policies in your Supabase project.
+I chose Supabase because it sets up a REST API automatically for every table via PostgREST.
+
+1) Create tables (paste in SQL Editor)
+```sql
+-- Pills submitted by the device
+create table if not exists public.stimulants (
+  id bigint generated always as identity primary key,
+  created_at timestamptz not null default now(),
+  qty integer not null,
+  drug text not null,
+  dose integer not null,
+  dose_unit text not null
+);
+
+-- A simple status feed the device reads
+create table if not exists public.daily_log (
+  id bigint generated always as identity primary key,
+  created_at timestamptz not null default now(),
+  event_type text not null
+);
+
+-- Enable RLS
+alter table public.stimulants enable row level security;
+alter table public.daily_log enable row level security;
+
+-- Minimal policies for anon key (demo/dev). Adjust for production.
+drop policy if exists "anon read stimulants" on public.stimulants;
+create policy "anon read stimulants" on public.stimulants
+  for select to anon using (true);
+
+drop policy if exists "anon insert stimulants" on public.stimulants;
+create policy "anon insert stimulants" on public.stimulants
+  for insert to anon with check (true);
+
+drop policy if exists "anon read daily_log" on public.daily_log;
+create policy "anon read daily_log" on public.daily_log
+  for select to anon using (true);
+```
+
+2) Get your credentials
+- Supabase URL: Project Settings → API → Project URL
+- Anon key: Project Settings → API → anon key
+
+3) Put them in `secrets.py`
+```python
+SUPABASE_URL = "https://<your-project>.supabase.co"
+SUPABASE_KEY = "<anon-key>"
+WIFI_SSID = "<your-ssid>"
+WIFI_PASSWORD = "<your-wifi-password>"
+```
+
+Note: The policies above allow anonymous inserts/selects for quick start. For production, restrict by auth or move writes behind an authenticated edge function.
+### License
+MIT, see `LICENSE`.

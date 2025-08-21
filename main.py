@@ -8,7 +8,13 @@ except: import json
 try: import ntptime
 except: ntptime = None
 
-from secrets import WIFI_SSID, WIFI_PASSWORD, SUPABASE_URL, SUPABASE_KEY
+try:
+    from secrets import WIFI_SSID, WIFI_PASSWORD, SUPABASE_URL, SUPABASE_KEY
+except Exception:
+    WIFI_SSID = None
+    WIFI_PASSWORD = None
+    SUPABASE_URL = None
+    SUPABASE_KEY = None
 
 # display constants
 BUFFER_WIDTH, BUFFER_HEIGHT = 128, 64
@@ -577,9 +583,14 @@ def main():
     show_message(["Booting"])
     load_settings()
     
-    wifi_ok = connect_wifi(WIFI_SSID, WIFI_PASSWORD)
+    secrets_missing = not all([WIFI_SSID, WIFI_PASSWORD, SUPABASE_URL, SUPABASE_KEY])
+    wifi_ok = False if secrets_missing else connect_wifi(WIFI_SSID, WIFI_PASSWORD)
     print("wifi_ok", wifi_ok)
-    if not wifi_ok:
+    if secrets_missing:
+        error_type = "no secrets"
+        show_message(["secrets.py", "missing"]) 
+        time.sleep(2)
+    elif not wifi_ok:
         error_type = "no wifi"
         time.sleep(2)
     

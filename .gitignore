@@ -1,3 +1,21 @@
-.venv
-.micropico
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environments
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Local secrets
 secrets.py
+
+# Build/artifacts
+*.mpy
