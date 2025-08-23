@@ -38,10 +38,10 @@ led.value(1)  # active low
 # encoder state
 position = enc_last = enc_changed = last_enc_ms = last_reported_detent = 0
 switch_state = sw.value()
-switch_changed = last_sw_ms = 0
+switch_changed = last_sw_ms = switch_press_start_ms = 0
 
 # app state
-MODE_DISPLAY, MODE_SUBMIT, MODE_WARNING = 0, 1, 2
+MODE_DISPLAY, MODE_SUBMIT, MODE_WARNING, MODE_ENERGY, MODE_MOOD = 0, 1, 2, 3, 4
 mode = MODE_DISPLAY
 REQUEST_TIMEOUT_S = 2
 
@@ -59,6 +59,8 @@ DOSE, DOSE_UNIT = 5, "mg"
 
 # submission state
 submit_qty = submit_entry_detent = last_user_input_ms = 0
+energy_score = mood_score = 0
+energy_entry_detent = mood_entry_detent = 0
 
 # view system
 VIEW_STATUS, VIEW_NEXT_DOSE, VIEW_LAST_DOSE, VIEW_DAILY_TOTAL, VIEW_ERROR, VIEW_WARNING = range(6)
@@ -123,12 +125,16 @@ def _enc_irq(_):
 
 def _sw_irq(_):
     # switch interrupt handler
-    global switch_state, switch_changed, last_sw_ms
+    global switch_state, switch_changed, last_sw_ms, switch_press_start_ms
     ms = time.ticks_ms()
     if time.ticks_diff(ms, last_sw_ms) < 50: return
     last_sw_ms = ms
-    switch_state = sw.value()
-    switch_changed = True
+    new_state = sw.value()
+    if new_state == 0 and switch_state == 1:  # press down
+        switch_press_start_ms = ms
+    elif new_state == 1 and switch_state == 0:  # release
+        switch_changed = True
+    switch_state = new_state
 
 enc_a.irq(_enc_irq, Pin.IRQ_RISING | Pin.IRQ_FALLING)
 enc_b.irq(_enc_irq, Pin.IRQ_RISING | Pin.IRQ_FALLING)
@@ -209,6 +215,20 @@ def show_submission(qty):
     oled.fill(0)
     oled.text(FRIENDLY_NAME, x_for_alignment(FRIENDLY_NAME, "centre"), Y_OFFSET + TEXT_Y_ADJUST)
     _draw_big_number_centred(str(qty))
+    oled.show()
+
+def show_energy_submission(score):
+    # display energy submission screen with big number
+    oled.fill(0)
+    oled.text("energy", x_for_alignment("energy", "centre"), Y_OFFSET + TEXT_Y_ADJUST)
+    _draw_big_number_centred(str(score))
+    oled.show()
+
+def show_mood_submission(score):
+    # display mood submission screen with big number
+    oled.fill(0)
+    oled.text("mood", x_for_alignment("mood", "centre"), Y_OFFSET + TEXT_Y_ADJUST)
+    _draw_big_number_centred(str(score))
     oled.show()
 
 def _draw_big_minutes_centred(minutes, label="mins"):
@@ -330,13 +350,20 @@ def fetch_supabase_post(endpoint, payload):
     
     r = None
     try:
+
+
         r = http_req("POST", url, headers, json.dumps(payload))
+        if r:
+            print(f"status: {r.status_code}")
+            if hasattr(r, 'text'):
+                print(f"response: {r.text}")
         if r and 200 <= r.status_code < 300:
             error_type = None
             return True
         error_type = "db fail"
         return False
-    except:
+    except Exception as e:
+        print(f"fetch_supabase_post exception: {e}")
         error_type = "db fail"
         return False
     finally:
@@ -363,6 +390,16 @@ def submit_dose(qty):
     # submit dose to database
     payload = {"qty": int(qty), "drug": DRUG_NAME, "dose": DOSE, "dose_unit": DOSE_UNIT}
     return fetch_supabase_post("stimulants", payload)
+
+def submit_reports(energy, mood):
+    # submit mood/energy reports to database
+    payload = {
+        "energy_score": None if energy == 0 else int(energy),
+        "mood_score": None if mood == 0 else int(mood),
+        "source": "pill_reminder"
+    }
+    result = fetch_supabase_post("reports", payload)
+    return result
 
 def format_iso_z(epoch):
     # format epoch as iso8601 utc
@@ -529,6 +566,34 @@ def enter_submission_mode():
     last_user_input_ms = time.ticks_ms()
     show_submission(submit_qty)
 
+def enter_energy_mode():
+    # enter energy submission mode
+    global mode, energy_score, energy_entry_detent, last_user_input_ms, alarm_buzzer_on
+    mode = MODE_ENERGY
+    buzzer.value(0)
+    alarm_buzzer_on = False
+    try: oled.invert(0)
+    except: pass
+    led.value(0)  # on
+    energy_entry_detent = position // 4 if position >= 0 else -((-position) // 4)
+    energy_score = 0
+    last_user_input_ms = time.ticks_ms()
+    show_energy_submission(energy_score)
+
+def enter_mood_mode():
+    # enter mood submission mode
+    global mode, mood_score, mood_entry_detent, last_user_input_ms, alarm_buzzer_on
+    mode = MODE_MOOD
+    buzzer.value(0)
+    alarm_buzzer_on = False
+    try: oled.invert(0)
+    except: pass
+    led.value(0)  # on
+    mood_entry_detent = position // 4 if position >= 0 else -((-position) // 4)
+    mood_score = 0
+    last_user_input_ms = time.ticks_ms()
+    show_mood_submission(mood_score)
+
 def enter_warning_mode(reason):
     # enter warning mode
     global mode, warning_reason, warning_end_ms, last_warning_flash_ms
@@ -561,7 +626,8 @@ def tick_alarm_effects():
         if alarm_buzzer_on:
             buzzer.value(0)
             alarm_buzzer_on = False
-        led.value(1)  # off
+        if mode == MODE_DISPLAY:
+            led.value(1)  # off
         try: oled.invert(0)
         except: pass
         return
@@ -665,27 +731,65 @@ def main():
                     last_user_input_ms = time.ticks_ms()
                     submit_qty = max(0, det - submit_entry_detent)
                     show_submission(submit_qty)
+                elif mode == MODE_ENERGY:
+                    last_user_input_ms = time.ticks_ms()
+                    energy_score = max(0, min(9, det - energy_entry_detent))
+                    show_energy_submission(energy_score)
+                elif mode == MODE_MOOD:
+                    last_user_input_ms = time.ticks_ms()
+                    mood_score = max(0, min(9, det - mood_entry_detent))
+                    show_mood_submission(mood_score)
             
             if switch_changed:
                 switch_changed = False
+                # calculate press duration
+                press_duration_ms = time.ticks_diff(time.ticks_ms(), switch_press_start_ms)
+                is_long_press = press_duration_ms >= 1000  # 1 second for long press
+                
                 if switch_state == 0:
                     if mode == MODE_DISPLAY:
-                        # cycle through available views
-                        available = [VIEW_STATUS]
-                        if next_dose_epoch: available.append(VIEW_NEXT_DOSE)
-                        available.extend([VIEW_LAST_DOSE, VIEW_DAILY_TOTAL])
-                        if error_type: available.append(VIEW_ERROR)
-                        
-                        try:
-                            i = available.index(current_view)
-                            current_view = available[(i + 1) % len(available)]
-                        except:
-                            current_view = available[0] if available else VIEW_STATUS
-                        last_view_interaction_ms = time.ticks_ms()
+                        if not is_long_press:
+                            # short press = cycle through available views
+                            available = [VIEW_STATUS]
+                            if next_dose_epoch: available.append(VIEW_NEXT_DOSE)
+                            available.extend([VIEW_LAST_DOSE, VIEW_DAILY_TOTAL])
+                            if error_type: available.append(VIEW_ERROR)
+                            
+                            try:
+                                i = available.index(current_view)
+                                current_view = available[(i + 1) % len(available)]
+                            except:
+                                current_view = available[0] if available else VIEW_STATUS
+                            last_view_interaction_ms = time.ticks_ms()
                     elif mode == MODE_WARNING:
                         enter_submission_mode()
-                elif mode == MODE_SUBMIT and switch_state == 1:
-                    last_user_input_ms = time.ticks_ms()
+                elif switch_state == 1:  # button released
+                    if mode == MODE_DISPLAY:
+                        if is_long_press:
+                            # long press from display = enter energy mode
+                            enter_energy_mode()
+                    elif mode == MODE_SUBMIT:
+                        # single press = instant submit
+                        last_user_input_ms = time.ticks_ms() - 5000
+                    elif mode == MODE_ENERGY:
+                        print(f"Energy mode button release: press_duration={press_duration_ms}ms, is_long_press={is_long_press}")
+                        if is_long_press:
+                            # long press = exit to display
+                            print("Energy mode: exiting to display")
+                            mode = MODE_DISPLAY
+                            led.value(1)  # off
+                            last_view_interaction_ms = time.ticks_ms()
+                        else:
+                            # short press = proceed to mood
+                            print("Energy mode: proceeding to mood")
+                            enter_mood_mode()
+                    elif mode == MODE_MOOD:
+                        if is_long_press:
+                            # long press = go back to energy
+                            enter_energy_mode()
+                        else:
+                            # short press = submit
+                            last_user_input_ms = time.ticks_ms() - 5000
             
             # submission mode timeout and processing
             if mode == MODE_SUBMIT and ms_since(last_user_input_ms) >= 5000:
@@ -723,10 +827,79 @@ def main():
                         if success:
                             show_message(["success"])
                             flash_led(3, 60, 60)
-                            mode = MODE_DISPLAY
-                            led.value(1)  # off
                             if info := fetch_last_dose(): last_info = info
                             alarm_grace_until_s = time.time() + 120
+                            enter_energy_mode()
+                        else:
+                            show_message(["fail"])
+                            flash_led(2, 200, 200)
+                            time.sleep(1)
+                            mode = MODE_DISPLAY
+                            led.value(1)  # off
+            
+            # energy mode timeout and processing
+            if mode == MODE_ENERGY and ms_since(last_user_input_ms) >= 5000:
+                if energy_score < 0:
+                    mode = MODE_DISPLAY
+                    led.value(1)  # off
+                else:
+                    # warn with flashing then move to mood
+                    canceled = False
+                    for _ in range(6):
+                        led.value(1 - led.value())
+                        step_start = time.ticks_ms()
+                        while ms_since(step_start) < 500:
+                            if enc_changed or switch_changed:
+                                canceled = True
+                                break
+                            time.sleep_ms(100)
+                        if canceled: break
+                    
+                    if canceled:
+                        led.value(0)  # on
+                        last_user_input_ms = time.ticks_ms()
+                        enc_changed = switch_changed = False
+                    else:
+                        enter_mood_mode()
+            
+            # mood mode timeout and processing
+            if mode == MODE_MOOD and ms_since(last_user_input_ms) >= 5000:
+                if mood_score < 0:
+                    mode = MODE_DISPLAY
+                    led.value(1)  # off
+                else:
+                    # warn with flashing then submit
+                    canceled = False
+                    for _ in range(6):
+                        led.value(1 - led.value())
+                        step_start = time.ticks_ms()
+                        while ms_since(step_start) < 500:
+                            if enc_changed or switch_changed:
+                                canceled = True
+                                break
+                            time.sleep_ms(100)
+                        if canceled: break
+                    
+                    if canceled:
+                        led.value(0)  # on
+                        last_user_input_ms = time.ticks_ms()
+                        enc_changed = switch_changed = False
+                    else:
+                        # submit with retries
+                        success = False
+                        for attempt in range(1, 4):
+                            show_message(["retrying", f"{attempt}/3..."])
+                            if submit_reports(energy_score, mood_score):
+                                success = True
+                                break
+                            flash_led(1, 150, 150)
+                            time.sleep(0.3)
+                        
+                        if success:
+                            show_message(["success"])
+                            flash_led(3, 60, 60)
+                            mode = MODE_DISPLAY
+                            led.value(1)  # off
                         else:
                             show_message(["fail"])
                             flash_led(2, 200, 200)
