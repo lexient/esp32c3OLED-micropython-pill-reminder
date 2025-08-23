@@ -689,7 +689,7 @@ def main():
             
             # submission mode timeout and processing
             if mode == MODE_SUBMIT and ms_since(last_user_input_ms) >= 5000:
-                if submit_qty <= 0:
+                if submit_qty < 0:
                     mode = MODE_DISPLAY
                     led.value(1)  # off
                 else:
