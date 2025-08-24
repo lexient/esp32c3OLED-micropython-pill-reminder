@@ -450,7 +450,7 @@ def fetch_today_summary():
     last_epoch = None
     for item in data:
         q = int(item.get("qty") or 0)
-        d = int(item.get("dose", DOSE))
+        d = int(item.get("dose") or DOSE)
         qty_sum += q
         total_mg += q * d
         if ce := item.get("created_at"):
@@ -645,6 +645,7 @@ def main():
     global error_type, current_view, last_view_interaction_ms, post_submit_display_until_s
     global enc_changed, position, switch_changed, switch_state, mode, submit_qty, alarm_grace_until_s
     global warning_end_ms, last_warning_flash_ms, last_warning_render_ms, last_user_input_ms, submit_entry_detent, warning_reason
+    global energy_score, mood_score, energy_entry_detent, mood_entry_detent
     
     show_message(["Booting"])
     load_settings()
@@ -860,13 +861,13 @@ def main():
                         last_user_input_ms = time.ticks_ms()
                         enc_changed = switch_changed = False
                     else:
-                        enter_mood_mode()
+                        mode = MODE_DISPLAY
+                        led.value(1)  # off
             
             # mood mode timeout and processing
             if mode == MODE_MOOD and ms_since(last_user_input_ms) >= 5000:
                 if mood_score < 0:
-                    mode = MODE_DISPLAY
-                    led.value(1)  # off
+                    enter_energy_mode()
                 else:
                     # warn with flashing then submit
                     canceled = False
