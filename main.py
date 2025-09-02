@@ -498,7 +498,7 @@ def check_submission_restrictions(last_dose_epoch, today_qty_sum):
     max_pills = get_setting("max_doses_per_day")
     
     if today_qty_sum is not None and today_qty_sum >= max_pills: return False, "limit"
-    if now < ws or now > we: return False, "too soon" if now < ws else "too late"
+    if now > we: return False, "too late"
     if last_dose_epoch and now < (last_dose_epoch + get_setting("dose_interval_min") * 60):
         return False, "too soon"
     return True, None
