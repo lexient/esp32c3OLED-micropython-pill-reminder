@@ -1,7 +1,7 @@
 ## MicroPython Pill Timer
 Built for myself, an individual so forgetful that he often forgets to take his medication, as well as whether he took it in the first place. 
 
-I'm a full stack web dev, and this is my first ever MicroPython project - so keep your expectations fairly low.
+This is set up for my own personal server, but if you're actually interested in building this and need help, then create an issue :D
 
 ### Introduction
 I've dabbled with Arduino but never MicroPython. 

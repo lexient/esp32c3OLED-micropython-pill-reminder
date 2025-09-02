@@ -374,7 +374,12 @@ def fetch_supabase_post(endpoint, payload):
 
 def fetch_last_dose():
     # fetch most recent dose from database
-    data = fetch_supabase_get("stimulants", "?select=created_at,qty,drug,dose,dose_unit&order=created_at.desc&limit=1")
+    data = fetch_supabase_get(
+    "stimulants",
+    "?select=created_at,qty,drug,dose,dose_unit"
+    "&drug=ilike.dexamphetamine"
+    "&order=created_at.desc&limit=1"
+    )
     if data and isinstance(data, list) and len(data) > 0:
         item = data[0]
         return {
