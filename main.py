@@ -815,15 +815,19 @@ def main():
                         last_user_input_ms = time.ticks_ms()
                         enc_changed = switch_changed = False
                     else:
-                        # submit with retries
-                        success = False
-                        for attempt in range(1, 4):
-                            show_message(["retrying", f"{attempt}/3..."])
-                            if submit_dose(submit_qty):
-                                success = True
-                                break
-                            flash_led(1, 150, 150)
-                            time.sleep(0.3)
+                        # attempt initial submission
+                        show_message(["submitting..."])
+                        success = submit_dose(submit_qty)
+                        
+                        # retry if initial submission failed
+                        if not success:
+                            for attempt in range(1, 4):
+                                show_message(["retrying", f"{attempt}/3..."])
+                                if submit_dose(submit_qty):
+                                    success = True
+                                    break
+                                flash_led(1, 150, 150)
+                                time.sleep(0.3)
                         
                         if success:
                             show_message(["success"])
@@ -886,15 +890,19 @@ def main():
                         last_user_input_ms = time.ticks_ms()
                         enc_changed = switch_changed = False
                     else:
-                        # submit with retries
-                        success = False
-                        for attempt in range(1, 4):
-                            show_message(["retrying", f"{attempt}/3..."])
-                            if submit_reports(energy_score, mood_score):
-                                success = True
-                                break
-                            flash_led(1, 150, 150)
-                            time.sleep(0.3)
+                        # attempt initial submission
+                        show_message(["submitting..."])
+                        success = submit_reports(energy_score, mood_score)
+                        
+                        # retry if initial submission failed
+                        if not success:
+                            for attempt in range(1, 4):
+                                show_message(["retrying", f"{attempt}/3..."])
+                                if submit_reports(energy_score, mood_score):
+                                    success = True
+                                    break
+                                flash_led(1, 150, 150)
+                                time.sleep(0.3)
                         
                         if success:
                             show_message(["success"])
